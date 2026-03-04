@@ -1,0 +1,58 @@
+# Docker Compose file format version
+# (version key is optional in modern Docker Compose but good to know)
+
+services:
+
+  # ── MinIO — our S3-compatible data lake ──────────────────────────────────
+  minio:
+    image: minio/minio:latest         # official MinIO image from Docker Hub
+    container_name: mindful-minio     # give it a readable name
+    command: server /data --console-address ":9001"
+    # "server /data" starts MinIO serving files from /data
+    # "--console-address :9001" starts the web UI on port 9001
+    ports:
+      - "9000:9000"    # S3 API — your Python code talks to this
+      - "9001:9001"    # MinIO web console — you open this in browser
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}         # read from .env
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD} # read from .env
+    volumes:
+      - minio_data:/data    # persist all files here
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Redis — our message broker and cache ─────────────────────────────────
+  redis:
+    image: redis:7-alpine    # alpine = tiny linux, much smaller image
+    container_name: mindful-redis
+    ports:
+      - "6379:6379"          # standard Redis port
+    volumes:
+      - redis_data:/data     # persist Redis data (streams, cached scores)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      # redis-cli ping returns "PONG" if Redis is healthy
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── RedisInsight — visual UI to see what's in Redis ──────────────────────
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: mindful-redisinsight
+    ports:
+      - "5540:5540"          # open localhost:5540 in browser
+    depends_on:
+      redis:
+        condition: service_healthy    # wait until Redis passes healthcheck
+    restart: unless-stopped
+
+# ── Named volumes declaration ─────────────────────────────────────────────
+volumes:
+  minio_data:      # Docker manages where this actually lives on your machine
+  redis_data:
