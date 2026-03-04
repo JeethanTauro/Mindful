@@ -581,3 +581,90 @@ The pipeline comes to life tomorrow. Today was about understanding the ground we
 ---
 
 > **Before Day 2:** Read [`python_oop.md`](./python_oop.md) — covers classes, objects, constructors, inheritance, and dataclasses. Every tool you use tomorrow is built on these concepts.
+
+
+---
+
+## Day 2: Environment Setup, Docker & Data Lake Foundation
+
+> *"Before writing a single spider, the ground has to be solid."*
+
+---
+
+### What We Did Today
+
+**Understood Docker properly**
+Cleared up the mental model — a Dockerfile is a recipe, an image is the frozen snapshot built from that recipe, and a container is the running instance of that image. Docker Compose is what ties multiple containers together so they start, network, and shut down as one unit. The key insight: you don't install Redis or MinIO on your machine — you run them as isolated containers that your machine hosts but doesn't own.
+
+**Wrote `docker-compose.yml`**
+Brought up three services in one file:
+- **MinIO** — S3-compatible object storage, our data lake. API on port `9000`, web console on `9001`
+- **Redis** — our message broker. Runs on port `6379`
+- **RedisInsight** — visual UI for Redis. Runs on port `5540`, depends on Redis being healthy before starting
+
+Both MinIO and Redis have named volumes (`minio_data`, `redis_data`) so data survives container restarts. Credentials for MinIO are injected from `.env` via `${MINIO_ROOT_USER}` and `${MINIO_ROOT_PASSWORD}` — never hardcoded.
+
+**Understood anonymous sessions**
+Decided against login and authentication for now. Users are identified by a UUID stored in a long-lived browser cookie — same mechanism every major platform uses for logged-out recommendations. The cookie IS the user. Profile, events, and scores all tie to that UUID.
+
+**Set up `.env` and `config.py`**
+`.env` holds all credentials and connection strings — MinIO endpoint, credentials, bucket name, Redis URL, stream name. `config.py` sits at the project root, calls `load_dotenv()` once, and exposes every variable as a named Python constant. Every other file imports from `config` instead of calling `os.getenv()` scattered everywhere.
+
+**Understood the connection string**
+Redis connection string is just an address — `redis://localhost:6379`. Protocol, host, port. That's it. Stored in `.env` as `REDIS_URL`.
+
+**Narrowed down sources**
+Dropped Reddit for now. Focusing on three fully open sources that need no API keys:
+- Hacker News — Firebase REST API
+- ArXiv — XML API
+- Wikipedia — MediaWiki API
+
+All three are open, well-documented, and together cover community discussion, primary research, and reference knowledge — a genuinely rich corpus.
+
+**Wrote `scripts/setup_minio.py`**
+Used `boto3` pointed at the local MinIO endpoint instead of AWS. Creates the `raw` bucket on first run, handles the `BucketAlreadyOwnedByYou` error gracefully so it's safe to run multiple times.
+
+**Ran it and verified**
+```
+Bucket 'raw' created successfully
+```
+Confirmed visually in the MinIO web console at `localhost:9001`. Bucket exists, Python is talking to MinIO correctly, `config.py` is reading `.env` correctly — all three validated in one run.
+
+---
+
+### What the Project Structure Looks Like Now
+
+```
+mindful/
+├── config.py                  ✅ done
+├── docker-compose.yml         ✅ done
+├── .env                       ✅ done
+├── .gitignore                 ✅ done
+├── scripts/
+│   └── setup_minio.py         ✅ done, run once
+└── ingestion/
+    ├── schema.py              ← tomorrow
+    ├── lake_writer.py         ← tomorrow
+    ├── stream_publisher.py    ← tomorrow
+    ├── main.py                ← tomorrow
+    └── spiders/
+        ├── hackernews.py      ← tomorrow
+        ├── arxiv.py           ← tomorrow
+        └── wikipedia.py       ← tomorrow
+```
+
+---
+
+### Tomorrow — Day 3
+
+- Write `schema.py` — the `RawArticle` dataclass, the contract every spider must produce
+- Write the three spiders — HN, ArXiv, Wikipedia
+- Write `lake_writer.py` — serializes `RawArticle` to JSON, writes to MinIO
+- Write `stream_publisher.py` — publishes a message to Redis Stream after each write
+- Wire everything in `main.py` — run all three spiders end to end
+- Verify — files in MinIO, messages in RedisInsight
+
+---
+
+*Mindful Build Log — Day 2 of 56*
+*Next: Day 3 — Spiders, Lake Writer & Redis Stream*
