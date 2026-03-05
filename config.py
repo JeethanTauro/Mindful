@@ -15,4 +15,9 @@ MINIO_BUCKET_RAW = os.getenv("MINIO_BUCKET_RAW", "raw")
 # Redis
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 REDIS_STREAM_NAME = os.getenv("REDIS_STREAM_NAME", "mindful:raw:new")
+REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 
+#API
+HACKER_TOP_STORIES=os.getenv("HACKER_TOP_STORIES", "https://hacker-news.firebaseio.com/v0/topstories.json?print=pretty")
+HACKER_NEW_STORIES=os.getenv("HACKER_NEW_STORIES","https://hacker-news.firebaseio.com/v0/newstories.json?print=pretty")
+HACKER_NEWS_ITEM=os.getenv("HACKER_NEWS_ITEM","https://hacker-news.firebaseio.com/v0/item/47252349.json?print=pretty")
