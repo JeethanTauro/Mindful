@@ -38,7 +38,7 @@ def fetch_content():
         for paper in search.results():
             papers.append({
                 "title": paper.title,
-                "authors": [a.name for a in paper.authors],
+                "authors":", ".join([a.name for a in paper.authors]),
                 "summary": paper.summary,
                 "published": paper.published,
                 "pdf_url": paper.pdf_url,
@@ -117,10 +117,7 @@ def upload(list_json,list_dic):
         except Exception as e:
             print(e)
 
-
-        #if only successfully uploaded then push to stream
-        if result is True:
-            publish_to_redis_stream(event,db=db) #needed to convert the event into dict because add stream takes in dict
+        publish_to_redis_stream(event,db=db) #needed to convert the event into dict because add stream takes in dict
 
 
 #i will be using walrus which is an extension of redis stream made by a developer
