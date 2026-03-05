@@ -668,3 +668,451 @@ mindful/
 
 *Mindful Build Log — Day 2 of 56*
 *Next: Day 3 — Spiders, Lake Writer & Redis Stream*
+
+
+---
+
+## Day 3: First Spider — Hacker News Pipeline End to End
+
+> *"The pipeline is alive. Real articles, real content, sitting in MinIO with Redis Stream messages pointing to them."*
+
+---
+
+### What We Built Today
+
+A complete ingestion pipeline for Hacker News — from raw API response all the way to MinIO storage and Redis Stream publishing. Every piece written from scratch, reading docs directly.
+
+**The full flow working by end of day:**
+```
+HN Firebase API → fetch IDs → hit item endpoints → RawArticle objects
+→ JSON serialization → MinIO upload → Redis Stream publish
+```
+
+---
+
+### Files Written Today
+
+**`ingestion/schema.py`** — The data contracts for the entire ingestion layer. Two dataclasses:
+
+- `RawArticle` — the common shape every spider must produce. Fields: `source`, `url`, `title`, `author`, `content`, `published_at`, `tags` (required), plus auto-generated `id` (UUID) and `scraped_at` (datetime). Required fields come first, optional and auto-generated come last — dataclass rule.
+- `StreamEvent` — the message published to Redis Stream after each MinIO write. Fields: `event_type`, `article_id`, `minio_path`, `source`, auto-generated `timestamp`.
+
+**`ingestion/spiders/hackernews.py`** — The full HN spider with five functions:
+
+- `fetch_ids()` — hits top stories and new stories endpoints, returns list of lists
+- `flatten_list_ids()` — list comprehension to flatten into one list
+- `hit_item_endpoint()` — core logic, processes each ID into a RawArticle
+- `convert_into_json()` — serializes RawArticle objects to JSON strings
+- `upload()` — writes to MinIO and publishes to Redis Stream with retry logic
+
+---
+
+### Problems We Hit and How We Fixed Them
+
+**Problem 1 — Item endpoint URL breaking on every loop**
+The endpoint URL was being mutated inside the loop:
+```python
+# WRONG — appends to same variable every iteration
+item_endpoint = item_endpoint + f"{id}.json"
+# second iteration becomes: base_url/123.json456.json
+```
+Fix: build a fresh `endpoint` variable inside the loop, never modify `item_endpoint`.
+
+---
+
+**Problem 2 — `global` keyword used incorrectly**
+`global content, author, title, url` was declared at the top of the function. `global` is only needed when modifying a variable that lives outside the function entirely. These variables were local — just define them inside the loop. Removed entirely.
+
+---
+
+**Problem 3 — `r["text"]` and `r["url"]` crashing on missing keys**
+HN API doesn't always include every field. Direct key access `r["text"]` throws `KeyError` if the field doesn't exist.
+Fix: use `r.get("text", "")` everywhere — returns empty string if key missing, never crashes.
+
+---
+
+**Problem 4 — Wrong field name for author**
+Used `r.get("author")` but HN API uses `"by"` not `"author"`. The sample response showed `"by": "almonerthis"` — easy to miss.
+Fix: `r.get("by", "")`.
+
+---
+
+**Problem 5 — Deduplication logic backwards**
+```python
+seen_ids = []
+for id in list_ids:
+    seen_ids.append(id)      # added BEFORE check
+    if id not in seen_ids:   # always False — never processes anything
+```
+Fix: check first, then add. Also switched from `list` to `set` — membership check on a set is O(1) instant, on a list it's O(n) slow.
+```python
+seen_ids = set()
+if id not in seen_ids:
+    seen_ids.add(id)
+```
+
+---
+
+**Problem 6 — `url` and `content` variables not defined before conditionals**
+If a story had no `url` field at all, `url` was never assigned, so `RawArticle(url=url)` crashed with `NameError`.
+Fix: initialize all variables as empty strings at the top of each loop iteration before any conditional logic touches them.
+```python
+url = ""
+content = ""
+title = ""
+author = ""
+```
+
+---
+
+**Problem 7 — `boto3` client vs resource confusion**
+Used `s3_client.Bucket('raw').put_object()` which is the `boto3.resource` API. We created a `boto3.client`, not a resource.
+Fix: `s3_client.put_object(Bucket='raw', Key=path, Body=json_data)` — client syntax.
+
+---
+
+**Problem 8 — `trafilatura.extract()` returning None**
+`trafilatura.extract()` returns `None` when it can't extract content — not an empty string. Passing `None` as content downstream causes crashes.
+Fix: `content = trafilatura.extract(response.text) or ""`
+
+---
+
+**Problem 9 — UUID not JSON serializable**
+```
+TypeError: Object of type UUID is not JSON serializable
+```
+The `id` field was a `UUID` object. `json.dumps` only handles basic Python types — `str`, `int`, `list`, `dict`. A `UUID` object is none of those.
+Fix: convert UUID to string at generation time in the dataclass:
+```python
+id: str = field(default_factory=lambda: str(uuid4()))
+```
+
+---
+
+**Problem 10 — `field()` object stored as actual value**
+```
+TypeError: Object of type Field is not JSON serializable
+```
+This happened because `field()` was called inside a regular class `__init__`:
+```python
+# WRONG — field() is a dataclass tool, not for regular classes
+self.id = field(default_factory=lambda: str(uuid4()))
+```
+`field()` doesn't execute the factory in a regular class — it just stores the `field` object itself as the value.
+Fix: converted `RawArticle` and `StreamEvent` to proper `@dataclass` classes. In a regular class, just call the function directly: `self.id = str(uuid4())`.
+
+---
+
+**Problem 11 — datetime objects not JSON serializable**
+```
+TypeError: Object of type datetime is not JSON serializable
+```
+Both `scraped_at` and `published_at` were `datetime` objects. `json.dumps` doesn't know how to serialize them.
+Fix: convert to ISO format strings before serializing:
+```python
+raw.scraped_at = raw.scraped_at.isoformat()
+raw.published_at = raw.published_at.isoformat() if raw.published_at else None
+```
+The `if raw.published_at else None` guard is needed because `published_at` can be `None` — calling `.isoformat()` on `None` crashes with `AttributeError`.
+
+---
+
+**Problem 12 — F-string quotes inside quotes**
+```python
+# SyntaxError — double quotes inside double-quoted f-string
+path = f"raw/{dic_data.get("scraped_at")}/{dic_data.get("id")}"
+```
+Fix: use single quotes inside:
+```python
+path = f"raw/{dic_data.get('scraped_at')}/{dic_data.get('id')}"
+```
+
+---
+
+**Problem 13 — `zip` used incorrectly**
+```python
+# WRONG — creates a tuple of two lists, only 2 iterations
+for json_data, dic_data in list_json, list_dic:
+```
+Fix: wrap with `zip()`:
+```python
+for json_data, dic_data in zip(list_json, list_dic):
+```
+
+---
+
+**Problem 14 — `result is True` never works**
+```python
+if result is True:  # always False — put_object never returns True
+    publish_to_redis_stream(...)
+```
+`boto3.put_object()` returns a response dictionary, not `True`. So the Redis publish never happened.
+Fix: wrap in try/except instead — if no exception is raised, upload succeeded. Added retry logic for Redis:
+```python
+try:
+    s3_client.put_object(Bucket='raw', Key=path, Body=json_data)
+    for attempt in range(4):
+        try:
+            publish_to_redis_stream(event, db)
+            break
+        except:
+            if attempt == 3:
+                print("failed to upload to redis")
+            else:
+                sleep(1)
+except Exception as e:
+    print(e)
+```
+
+---
+
+**Problem 15 — HTML in content from HN `text` field**
+Some HN posts store their content in a `text` field as raw HTML:
+```
+"<a href=\"https:&#x2F;&#x2F;www.apple.com\">https://www.apple.com</a>"
+```
+Fix: switched from using `trafilatura.fetch_url()` to fetching with `requests` using a real browser `User-Agent` header, then passing the response text directly to `trafilatura.extract()`. This bypasses most basic bot detection and gets cleaner content.
+```python
+headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+response = requests.get(url, headers=headers, timeout=10)
+content = trafilatura.extract(response.text) or ""
+```
+
+---
+
+**Problem 16 — RedisInsight couldn't connect using `127.0.0.1`**
+```
+Could not connect to 127.0.0.1:6379
+```
+RedisInsight runs inside a Docker container. `127.0.0.1` inside a container means "this container itself" — not the Redis container.
+Fix: use the Docker service name as the host. In RedisInsight connection settings:
+```
+Host: redis
+Port: 6379
+```
+Docker's internal DNS resolves `redis` to the correct container automatically.
+
+---
+
+### What a Successful Article Looks Like
+
+```json
+{
+  "source": "Hacker_News",
+  "url": "https://techcrunch.com/2026/03/04/anthropic-ceo-dario-amodei...",
+  "title": "Dario Amodei calls OpenAI\u2019s messaging around military deal \u2018straight up lies\u2019",
+  "author": "SilverElfin",
+  "content": "Anthropic co-founder and CEO Dario Amodei is not happy...",
+  "tags": ["hackernews"],
+  "published_at": "2026-03-05T05:21:10",
+  "id": "e7574581-ca54-4dde-85f9-9bd3ac137197",
+  "scraped_at": "2026-03-05T16:19:25.095665"
+}
+```
+
+Real article. Real content. Clean structure. Sitting in MinIO at:
+`raw/hackernews/{scraped_at}/{id}`
+
+With a corresponding Redis Stream message in `raw/hackernews` pointing to it.
+
+---
+
+### Current Project Status
+
+```
+✅ docker-compose.yml     — MinIO + Redis + RedisInsight running
+✅ config.py              — environment variables wired
+✅ scripts/setup_minio.py — raw bucket created and verified
+✅ ingestion/schema.py    — RawArticle + StreamEvent dataclasses
+✅ ingestion/spiders/hackernews.py — full spider, tested and working
+```
+
+---
+
+### Tomorrow — Day 4: ETL Layer
+
+The Redis Stream has messages. MinIO has raw JSON files. Now we build the worker that:
+
+- Reads messages from the Redis Stream
+- Fetches the raw JSON from MinIO
+- Cleans the content — strip HTML, normalize whitespace, detect language
+- Deduplicates by URL
+- Loads clean structured rows into DuckDB
+- Publishes a new event to a downstream stream for the embedding layer
+
+The raw data becomes structured data. The lake feeds the warehouse.
+
+---
+
+*Mindful Build Log — Day 3 of 56*
+*Next: Day 4 — ETL Worker, DuckDB Warehouse & Data Cleaning*
+
+---
+
+## Day 4 (Part 1): Refactoring — Separation of Concerns
+
+> *"Write it once, use it everywhere. If you're copying code, something is wrong."*
+
+---
+
+### The Problem — What We Had Before
+
+After writing all three spiders — Hacker News, ArXiv, and Wikipedia — we noticed a pattern. Every spider had the exact same three functions copy-pasted:
+
+```
+convert_into_json()    — identical in all 3 spiders
+upload()               — identical except for the path prefix
+publish_to_redis_stream() — identical in all 3 spiders
+```
+
+This is called a **code smell** — specifically the "don't repeat yourself" (DRY) violation. The immediate problem is obvious: if there's a bug in `upload()`, you have to fix it in three places. If you add a fourth spider later, you copy-paste it again. If the MinIO credentials change, you update three files. Every piece of duplicated logic is a future bug waiting to happen.
+
+---
+
+### The Principle — Separation of Concerns
+
+Each file should have **one job and own it completely**. A spider's job is to fetch data from its source and map it to a `RawArticle`. That's it. It should not know anything about:
+
+- How JSON serialization works
+- How boto3 connects to MinIO
+- How Redis Streams work
+- What the MinIO path structure looks like
+
+Those concerns belong to dedicated files that own them exclusively.
+
+---
+
+### What We Built
+
+**`ingestion/lake_writer.py`** — owns everything related to converting and storing data in MinIO.
+
+Responsibilities:
+- `convert_into_json()` — takes a list of `RawArticle` objects, handles datetime serialization, converts each to a dictionary and then to a JSON string
+- `upload()` — takes a list of raw articles and the spider name, creates the S3 client, builds the MinIO path, writes each file, triggers the Redis publish via `stream_publisher`
+
+The `spider` parameter passed to `upload()` is what makes it dynamic — the path becomes `raw/{spider}/{scraped_at}/{id}` so HN, ArXiv, and Wikipedia each land in their own folder automatically.
+
+The S3 client is created once at module level — not recreated on every call.
+
+---
+
+**`ingestion/stream_publisher.py`** — owns everything related to publishing events to Redis Streams.
+
+Responsibilities:
+- `publish_to_redis_stream()` — takes an event, a database connection, and a stream name. Converts the event to a dict and publishes it.
+
+The stream name is dynamic — `raw/{spider}` — so HN events go to `raw/hackernews`, ArXiv events go to `raw/arxiv`, Wikipedia events go to `raw/wikipedia`. Each source has its own stream so the ETL layer can consume them independently.
+
+---
+
+**`ingestion/connections.py`** — owns shared infrastructure connections.
+
+A single file that creates the Redis `db` connection once. Any file in the ingestion layer that needs Redis imports from here. One connection, one place to configure it.
+
+---
+
+### What the Spiders Look Like After Refactoring
+
+Before — a spider had 5 functions and knew about boto3, Redis, JSON, and MinIO paths:
+
+```
+fetch_ids()
+flatten_list_ids()
+hit_item_endpoint()
+convert_into_json()       ← not the spider's job
+upload()                  ← not the spider's job
+publish_to_redis_stream() ← not the spider's job
+```
+
+After — a spider has 2-3 functions and knows only about its data source:
+
+```
+fetch_content()    ← spider's actual job
+map_to_schema()    ← spider's actual job
+```
+
+And the entire `__main__` block collapses to:
+
+```python
+if __name__ == "__main__":
+    raw_articles = map_to_schema(fetch_content())
+    upload(raw_articles, "hackernews")
+```
+
+The spider fetches, maps, hands off. Done.
+
+---
+
+### The Dependency Flow After Refactoring
+
+```
+hackernews.py  ─┐
+arxiv.py        ├──→  lake_writer.py  ──→  stream_publisher.py
+wikipedia.py   ─┘           │                      │
+                             ↓                      ↓
+                           MinIO              Redis Stream
+                             │
+                        connections.py
+                        (shared db)
+```
+
+Arrows only point downward. No circular dependencies. Each layer only knows about the layer below it.
+
+---
+
+### The Bugs We Fixed During Refactoring
+
+**Removing dead code — `result is True`**
+
+```python
+# This existed in all three spiders — never executed
+if result is True:
+    publish_to_redis_stream(event, db=db)
+```
+
+`boto3.put_object()` returns a response dictionary, never `True`. This line never ran once across the entire time the spiders operated. Removed from all three files.
+
+**Removing unused imports**
+
+After refactoring, spiders were still importing `convert_into_json` from `lake_writer` even though they no longer called it directly — `upload()` handles it internally now. Cleaned up all spider imports to only import what they actually use.
+
+**Moving `db` connection out of `scripts/`**
+
+The Redis database connection was initially created in `scripts/redis_stream_db.py`. The `scripts/` folder is for one-time admin tasks like `setup_minio.py`. A shared connection that the entire ingestion layer depends on belongs in `ingestion/connections.py`. Moved.
+
+**`s3_client` moved to module level**
+
+Previously created inside `upload()` on every call — meaning three separate boto3 clients were created if all three spiders ran. Moved to module level in `lake_writer.py` so it's created once when the module loads and shared across all calls.
+
+---
+
+### The File Structure After Refactoring
+
+```
+ingestion/
+├── __init__.py
+├── connections.py          ← Redis db connection, created once
+├── schema.py               ← RawArticle + StreamEvent dataclasses
+├── lake_writer.py          ← convert_into_json + upload (owns MinIO)
+├── stream_publisher.py     ← publish_to_redis_stream (owns Redis)
+└── spiders/
+    ├── __init__.py
+    ├── hackernews.py       ← fetch + map only
+    ├── arxiv.py            ← fetch + map only
+    └── wikipedia.py        ← fetch + map only
+```
+
+---
+
+### What This Means for the Rest of the Project
+
+Every future spider — Reddit when we add it, any new source — only needs two functions: `fetch_content()` and `map_to_schema()`. It calls `upload(raw_articles, "source_name")` and everything else is handled automatically. Adding a new source is now a 50-line file instead of a 150-line file.
+
+More importantly, if the ETL layer changes how it wants events structured, or if we switch from MinIO to a different object store, or if we change the Redis Stream naming convention — we change **one file**. Not three. Not five. One.
+
+This is the difference between code that scales and code that becomes unmaintainable the moment a second person touches it.
+
+---
+
+*Mindful Build Log — Day 4 (Part 1) of 56*
+*Next: Day 4 (Part 2) — ETL Worker, DuckDB Schema & Data Cleaning*
