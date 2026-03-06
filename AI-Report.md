@@ -1115,4 +1115,265 @@ This is the difference between code that scales and code that becomes unmaintain
 ---
 
 *Mindful Build Log — Day 4 (Part 1) of 56*
-*Next: Day 4 (Part 2) — ETL Worker, DuckDB Schema & Data Cleaning*
+*Next: Day 4 (Part 2) — ETL Worker, DuckDB Schema & Data Cleaning*---
+
+## Day 4 (Full): Wikipedia Spider, Refactoring & Threaded Pipeline Orchestrator
+
+> *"Three spiders. One command. 68 seconds. 65 articles across three sources simultaneously."*
+
+---
+
+### What We Built Today
+
+Three major things:
+
+1. The Wikipedia spider — completing all three ingestion sources
+2. A full refactor — separating shared logic into `lake_writer.py` and `stream_publisher.py`
+3. `main.py` — a threaded orchestrator that runs all three spiders simultaneously
+
+By end of day, running one command fires all three spiders in parallel, uploads articles to MinIO, publishes events to Redis Streams, and reports a summary. The entire ingestion layer is complete.
+
+---
+
+### Part 1 — Wikipedia Spider
+
+Wikipedia was the simplest of the three sources. The `wikipedia` Python library wraps the MediaWiki API cleanly — no authentication, no API keys, clean plain text content straight from the response.
+
+**The approach:**
+Define a list of 11 topics relevant to Mindful's audience — Machine Learning, Artificial Intelligence, Cybersecurity, Programming Languages, Distributed Systems, Data Science, Agentic AI, Database Systems, Cloud Technology, Neural Networks, Natural Language Processing.
+
+For each topic, search Wikipedia and take the top 5 results. For each result, fetch the full page and map it to a `RawArticle`.
+
+**The disambiguation problem:**
+Wikipedia has disambiguation pages — pages like "Python" that just list "did you mean Python the language or Python the snake?" with no real content. Calling `wikipedia.page()` on a disambiguation title raises a `DisambiguationError`. This must be handled specifically or the entire category loop crashes.
+
+Solution — three separate except blocks inside the page fetch:
+
+```python
+try:
+    page = wikipedia.page(title)
+except wikipedia.DisambiguationError:
+    continue   # skip, move to next title
+except wikipedia.PageError:
+    continue   # page doesn't exist, skip
+except Exception as e:
+    print(e)
+    continue   # anything else, log and skip
+```
+
+**The RawArticle mapping:**
+- `source` → `"wikipedia"`
+- `url` → `page.url`
+- `title` → `page.title`
+- `author` → `"wikipedia"` — community written, no single author
+- `content` → `page.summary` — first 3-5 paragraphs, clean plain text, no HTML
+- `tags` → `page.categories[:5]` — Wikipedia's own category system, much richer than just `["wikipedia"]`
+- `published_at` → `None` — Wikipedia pages have no single publish date
+
+No trafilatura needed. No HTML stripping. Wikipedia gives you clean text directly — the easiest source of the three.
+
+---
+
+### Part 2 — Refactoring (Separation of Concerns)
+
+After all three spiders were written, a clear problem emerged — `convert_into_json`, `upload`, and `publish_to_redis_stream` were copy-pasted identically across all three spider files. Three copies of the same bug means fixing it three times. Three copies of the same improvement means updating three files.
+
+**The principle — DRY (Don't Repeat Yourself):**
+Every piece of logic should exist in exactly one place. If you find yourself copying a function, that function belongs in a shared file.
+
+**What moved where:**
+
+`ingestion/lake_writer.py` — owns everything related to storing data:
+- `convert_into_json()` — handles datetime serialization, converts RawArticle to dict and JSON string
+- `upload()` — takes a list of raw articles and spider name, creates S3 client, builds path, writes to MinIO, triggers stream publish
+
+The `spider` parameter makes `upload` dynamic — `raw/{spider}/{scraped_at}/{id}` means HN, ArXiv, and Wikipedia each land in their own folder automatically from one shared function.
+
+`ingestion/stream_publisher.py` — owns everything related to Redis:
+- `publish_to_redis_stream()` — takes event, db connection, stream name, publishes message
+
+`ingestion/connections.py` — owns shared infrastructure:
+- Redis `db` connection created once, imported by anyone who needs it
+
+**What the spiders look like after refactoring:**
+
+Before — 5+ functions, knew about boto3, Redis, JSON, MinIO paths:
+```
+fetch_ids / fetch_content / fetch_pages
+flatten / hit_endpoint / map_to_schema
+convert_into_json        ← not spider's job
+upload                   ← not spider's job
+publish_to_redis_stream  ← not spider's job
+```
+
+After — 2-3 functions, knows only about its data source:
+```
+fetch_content / fetch_ids
+map_to_schema
+```
+
+And the `__main__` block collapses to:
+```python
+upload(map_to_schema(fetch_content()), "arxiv")
+```
+
+**Bugs fixed during refactoring:**
+
+Dead code removed — `if result is True: publish_to_redis_stream(...)` existed in all three spiders. `boto3.put_object()` never returns `True` — this line never executed once. Removed from everywhere.
+
+`s3_client` moved to module level — previously created inside `upload()` on every call, meaning three separate boto3 clients were being instantiated. Now created once when `lake_writer.py` loads and shared across all calls. boto3 clients are thread-safe so sharing is fine.
+
+`db` connection moved from `scripts/` to `ingestion/connections.py` — admin scripts and shared application infrastructure are different things. The scripts folder is for one-time tasks like `setup_minio.py`, not for objects the entire ingestion layer depends on.
+
+---
+
+### Part 3 — main.py and Multithreading
+
+#### Why Multithreading
+
+Running the three spiders sequentially — HN then ArXiv then Wikipedia — means the total time is the sum of all three. If each takes 5 minutes, you wait 15 minutes. During HN's 5 minutes, ArXiv and Wikipedia sit doing nothing.
+
+The spiders are entirely **I/O-bound** — they spend almost all their time waiting for network responses. HTTP requests to APIs, trafilatura fetching URLs, boto3 writing to MinIO, walrus publishing to Redis. The CPU barely does anything. The program is constantly waiting.
+
+This is the perfect case for threading.
+
+#### The GIL — Why It Doesn't Matter Here
+
+Python has a Global Interpreter Lock (GIL) — a mechanism that prevents more than one thread from executing Python bytecode simultaneously. This makes threading useless for CPU-bound work — only one thread crunches numbers at a time anyway.
+
+But the GIL **releases during I/O operations**. When a thread makes a network request and waits for the response, it releases the GIL. Another thread picks it up and starts its own network request. Both requests are now in-flight simultaneously. The waiting is truly parallel even though the Python execution isn't.
+
+```
+Time →
+HN Thread:   [Python][ ===== waiting for HTTP ===== ][Python][ == waiting == ]
+ArXiv Thread:        [Python][ ===== waiting for arxiv API ===== ][Python]
+Wiki Thread:                 [Python][ === waiting for wikipedia === ][Python]
+
+[Python] = executing code, GIL held
+[=====]  = waiting for I/O, GIL released, other threads run freely
+```
+
+All three spiders' network requests are in-flight simultaneously. Total time becomes `max(HN_time, ArXiv_time, Wiki_time)` instead of `HN_time + ArXiv_time + Wiki_time`.
+
+#### ThreadPoolExecutor — The Implementation
+
+Python's `concurrent.futures.ThreadPoolExecutor` is the modern, clean way to run functions in threads. The pattern:
+
+```python
+with ThreadPoolExecutor(max_workers=3) as executor:
+    futures = {executor.submit(function, arg): name for ...}
+    for future in as_completed(futures):
+        result = future.result()
+```
+
+**Why a dictionary of futures:**
+`executor.submit()` returns a `Future` object — a promise that the result will eventually be there. By storing `{future: spider_name}`, when `as_completed()` yields a completed future, you can immediately look up which spider it was.
+
+A list of futures would work but you'd lose the name mapping — you'd know "something finished" but not "which spider finished."
+
+**Why `as_completed()` not `executor.map()`:**
+`executor.map()` blocks until ALL tasks finish and returns results in input order. If HN takes 5 minutes and ArXiv takes 1 minute, you wait 5 minutes before seeing any result.
+
+`as_completed()` yields futures the moment each one finishes. ArXiv's result appears after 1 minute. HN's result appears after 5 minutes. You process each result immediately rather than waiting for the slowest one.
+
+**The wrapper functions:**
+`ThreadPoolExecutor` needs one single callable per task. Each spider has multiple functions (`fetch`, `map_to_schema`, `upload`). The wrapper bundles them into one:
+
+```python
+def arxiv_spider_run():
+    results = arxiv_spider.fetch_content()
+    list_raw_articles = arxiv_spider.map_to_schema(results)
+    upload(list_raw_articles, "arxiv")
+    return len(list_raw_articles)
+```
+
+The return value — `len(list_raw_articles)` — becomes `future.result()` in the main thread. This is how the orchestrator knows how many articles each spider processed.
+
+**Per-spider exception handling:**
+Each future is wrapped in its own try/except:
+
+```python
+try:
+    result = future.result()
+    print(f"{spider_name} completed: {result}")
+except Exception as exc:
+    print(f"{spider_name} failed: {exc}")
+```
+
+If HN crashes completely, ArXiv and Wikipedia results are still printed. One failure doesn't kill the summary. The pipeline is fault-tolerant at the orchestrator level.
+
+#### The Signal Warning
+
+Running the spiders in threads produced this warning repeatedly:
+```
+signal only works in main thread of the main interpreter
+```
+
+This comes from trafilatura's internal timeout mechanism. Trafilatura uses Python's `signal` module to interrupt slow URL fetches. But signal handlers can only be registered from the main thread — in a worker thread, the attempt fails with this warning.
+
+It's a warning, not an error. The spider keeps running. The fix is that trafilatura receives already-fetched HTML from `requests.get(url, timeout=10)` — the `timeout=10` handles the network hang, so trafilatura is just parsing a string in memory with no network operation left to timeout. The warning is noise. Articles still upload correctly.
+
+#### The Result
+
+```
+arxiv_spider completed : 50
+wikipedia_spider completed : 18
+hackernews_spider completed : 10
+Total time elapsed : 0:01:08.571927
+Process finished with exit code 0
+```
+
+65 articles across three sources in 68 seconds. All three running simultaneously. Exit code 0 — no crashes.
+
+---
+
+### Final Ingestion Layer Structure
+
+```
+ingestion/
+├── __init__.py
+├── connections.py          ✅ Redis db connection
+├── schema.py               ✅ RawArticle + StreamEvent dataclasses
+├── lake_writer.py          ✅ convert_into_json + upload
+├── stream_publisher.py     ✅ publish_to_redis_stream
+├── main.py                 ✅ threaded orchestrator
+└── spiders/
+    ├── __init__.py
+    ├── hackernews.py       ✅ fetch + map only
+    ├── arxiv.py            ✅ fetch + map only
+    └── wikipedia.py        ✅ fetch + map only
+```
+
+Every file has exactly one responsibility. Every spider is identical in shape. Adding a fourth source means writing one 40-line file and adding one wrapper to `main.py`.
+
+---
+
+### Verified End-to-End
+
+- ✅ MinIO — three folders in `raw` bucket, JSON files in each
+- ✅ RedisInsight — three streams with messages pointing to MinIO paths
+- ✅ All three spiders complete without crashes
+- ✅ Fault tolerant — one spider failure doesn't affect others
+- ✅ Threaded — all three run simultaneously
+
+---
+
+### Tomorrow — Day 5: ETL Layer
+
+The Redis streams have messages. MinIO has raw JSON files. DuckDB is empty.
+
+Tomorrow the ETL worker:
+- Reads messages from Redis Streams
+- Fetches raw JSON from MinIO
+- Cleans content — strip HTML, normalize whitespace, detect language
+- Deduplicates by URL
+- Computes word count
+- Loads clean rows into DuckDB
+- Publishes downstream events for the embedding layer
+
+The lake feeds the warehouse. Raw data becomes structured data.
+
+---
+
+*Mindful Build Log — Day 4 of 56*
+*Next: Day 5 — ETL Worker, DuckDB Warehouse & Data Cleaning*
