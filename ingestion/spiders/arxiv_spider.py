@@ -70,6 +70,8 @@ def map_to_schema(results):
     return raw_articles
 
 
+#so basically this means that only if this file or script is run manually then it will do all the works fro start to finish,
+#when this is imported in main we only get the fetch and map to schema, we dont get the lake wrtier part,
 if __name__ == "__main__":
     results = fetch_content()
     print(results)
