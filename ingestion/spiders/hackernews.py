@@ -1,11 +1,10 @@
-import dataclasses
 from datetime import datetime
 from time import sleep
 import trafilatura
 import requests
 import config
-from ingestion.lake_writer import upload, convert_into_json
-from ingestion.schema import RawArticle, StreamEvent
+from ingestion.lake_writer import upload
+from ingestion.schema import RawArticle
 import json
 import boto3
 from walrus import Database  # A subclass of the redis-py Redis client.

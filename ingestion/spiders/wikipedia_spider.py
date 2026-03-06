@@ -1,13 +1,9 @@
 from time import sleep
 
-import boto3
 import wikipedia
-from walrus import Database
-import json
 
-import config
-from ingestion.lake_writer import upload, convert_into_json
-from ingestion.schema import RawArticle, StreamEvent
+from ingestion.lake_writer import upload
+from ingestion.schema import RawArticle
 
 categories = [
     "Machine learning",

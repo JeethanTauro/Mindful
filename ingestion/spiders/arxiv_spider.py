@@ -1,14 +1,8 @@
 import arxiv
 
-from ingestion.lake_writer import convert_into_json, upload
+from ingestion.lake_writer import upload
 from ingestion.schema import RawArticle
-import json
-import boto3
-from walrus import Database
-from datetime import datetime
 from time import sleep
-from ingestion.schema import StreamEvent
-import config
 
 
 # categories you want
