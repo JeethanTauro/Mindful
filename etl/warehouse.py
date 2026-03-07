@@ -14,4 +14,4 @@ def insert_into_warehouse(articles):
     for article in articles:
         con.execute("SELECT * FROM articles_warehouse WHERE url = ? ",[article.url])
         if con.fetchone() is None:
-            con.execute("INSERT INTO articles_warehouse VALUES (?, ? , ? , ? , ? , ? , ? , ? , ? , ? , ? ,? , ? ,?,?)", (article.id,article.source,article.url,article.title,article.author,article.content,article.word_count,article.reading_time,article.language,article.tags,article.published_at,article.scraped_at,article.processed_at,article.updated_at,article.embedding_id))
+            con.execute("INSERT INTO articles_warehouse VALUES ( ?, ? , ? , ? , ? , ? , ? , ? , ? , ? , ? ,? , ? , ? , ? , ? )", (article.id,article.source,article.url,article.title,article.author,article.content,article.word_count,article.reading_time,article.language,article.tags,article.published_at,article.scraped_at,article.processed_at,article.updated_at,article.embedding_id))
