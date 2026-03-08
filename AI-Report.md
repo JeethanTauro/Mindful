@@ -1377,3 +1377,495 @@ The lake feeds the warehouse. Raw data becomes structured data.
 
 *Mindful Build Log — Day 4 of 56*
 *Next: Day 5 — ETL Worker, DuckDB Warehouse & Data Cleaning*
+# Day 5 — ETL Layer: Cleaner, Enricher & Consumer
+
+> *"Raw data is worthless. Clean, structured, queryable data is the product. Today we built the bridge between the two."*
+
+---
+
+## What We Built Today
+
+Three files completing the ETL layer:
+
+1. `etl/cleaner.py` — validates and cleans raw dictionaries from MinIO
+2. `etl/enricher.py` — adds computed fields and converts to `ArticleSchema`
+3. `etl/consumer.py` — reads Redis Streams, orchestrates the entire ETL pipeline
+
+By end of day: articles flowing from Redis Streams → MinIO → cleaner → enricher → DuckDB warehouse. Verified with 1219 ArXiv articles, 16 Wikipedia articles, and HN articles successfully inserted and queryable.
+
+---
+
+## Part 1 — cleaner.py Line by Line
+
+The cleaner's philosophy: **nothing downstream ever has to worry about dirty data.** Every article that exits the cleaner is guaranteed to be valid, clean, and ready for enrichment. Rejections happen here, not later.
+
+```python
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+```
+
+Two imports only. `BeautifulSoup` from the `bs4` library for HTML stripping. `urlparse` from Python's built-in `urllib.parse` for URL validation. No external dependencies beyond bs4 — kept deliberately minimal.
+
+---
+
+### `remove_tags(content)`
+
+```python
+def remove_tags(content):
+    soup = BeautifulSoup(content, "html.parser")
+    for data in soup(["script", "style"]):
+        data.decompose()
+    return ' '.join(soup.stripped_strings)
+```
+
+**Line 1** — `BeautifulSoup(content, "html.parser")` — parse the content string as HTML. The `html.parser` argument tells BeautifulSoup to use Python's built-in HTML parser, no external parser needed. This handles malformed HTML gracefully — HN's inline text field contains raw HTML with `<p>` tags, `<a href>` links, `<i>` italic text, encoded entities like `&#x2F;` and `&amp;`.
+
+**Line 2** — `soup(["script", "style"])` — find all `<script>` and `<style>` tags in the document. These contain JavaScript code and CSS rules respectively — neither is meaningful text content. `.decompose()` removes them from the parse tree entirely before extracting text.
+
+**Line 3** — `soup.stripped_strings` — a generator that yields all text strings in the document, automatically stripping leading and trailing whitespace from each one. `' '.join(...)` joins them with a single space into one clean string.
+
+Result: raw HTML like `<p>This is <a href="http://example.com">a link</a> with <i>emphasis</i></p>` becomes `"This is a link with emphasis"`.
+
+---
+
+### `normalise_whitespaces(text)`
+
+```python
+def normalise_whitespaces(text):
+    return ' '.join(text.split())
+```
+
+`.split()` with no argument splits on any whitespace — spaces, tabs, newlines, multiple consecutive spaces — and returns a list of non-empty words. `' '.join(...)` rejoins them with exactly one space between each word.
+
+This collapses `"word1   \t  word2\n\nword3"` into `"word1 word2 word3"`. One line, handles all whitespace edge cases, no regex needed.
+
+---
+
+### `normalise_source(text)`
+
+```python
+def normalise_source(text):
+    return text.lower().strip()
+```
+
+The ingestion layer stores `"Hacker_News"` with capital H and underscore. The warehouse expects consistent lowercase. `.lower()` handles capitalisation, `.strip()` handles any leading or trailing whitespace. `"Hacker_News"` becomes `"hacker_news"`, `"Wikipedia"` becomes `"wikipedia"`.
+
+---
+
+### `valid_url(url)`
+
+```python
+def valid_url(url):
+    try:
+        parsed = urlparse(url)
+        return all([parsed.scheme in ("http", "https", "ftp"), parsed.netloc])
+    except Exception:
+        return False
+```
+
+`urlparse` breaks a URL string into components — scheme, netloc, path, params, query, fragment. A valid URL needs at minimum a scheme (`http`, `https`, or `ftp`) and a netloc (the domain — `example.com`).
+
+`all([condition1, condition2])` returns `True` only if both conditions are True. So `https://example.com/path` passes — scheme is `https`, netloc is `example.com`. But `not-a-url` fails — no scheme, no netloc. `javascript:void(0)` fails — scheme is `javascript` not in the allowed list.
+
+The outer `try/except` catches any edge cases where `urlparse` itself throws — malformed strings, unicode issues.
+
+---
+
+### `cleaner(article_dict)` — The Main Function
+
+```python
+def cleaner(article_dict):
+    if not article_dict.get("title"):
+        return None
+    if not article_dict.get("content"):
+        return None
+    if article_dict.get("url") and not valid_url(article_dict.get("url")):
+        return None
+```
+
+**The early return / guard clause pattern.** Instead of one giant nested `if/else`, we return `None` immediately the moment we find a fatal problem. The rest of the function only runs on articles that pass all checks.
+
+**`not article_dict.get("title")`** — `dict.get("title")` returns `None` if key doesn't exist, or whatever value is stored. `not None` is `True`. `not ""` is also `True`. This single check catches both missing keys and empty strings — an article with no title has no value.
+
+**`not article_dict.get("content")`** — same pattern. No content means nothing to clean, nothing to embed, nothing to recommend. Reject.
+
+**`article_dict.get("url") and not valid_url(...)`** — note this is different from the title/content checks. URL is not always required — HN text-only articles have empty URLs. So we only validate the URL if it exists. If URL is empty, we allow it through. If URL exists but is malformed, we reject. This handles the HN text-only articles correctly.
+
+```python
+    article_dict["content"] = remove_tags(article_dict["content"])
+    article_dict["title"] = remove_tags(article_dict["title"])
+
+    article_dict["content"] = normalise_whitespaces(article_dict["content"])
+    article_dict["title"] = normalise_whitespaces(article_dict["title"])
+
+    article_dict["source"] = normalise_source(article_dict["source"])
+```
+
+Strip HTML from content first, then title — both can contain HTML. Then normalize whitespace in both. Then normalize the source name. Order matters — strip HTML before normalizing whitespace, because HTML stripping can leave extra spaces that whitespace normalization then cleans up.
+
+```python
+    if article_dict.get("author") is None:
+        article_dict["author"] = "unknown"
+```
+
+Author is not a rejection condition — an article without an author is still valuable. We default to `"unknown"` rather than storing `None`, which would cause issues downstream when the warehouse tries to insert a NULL into a VARCHAR column.
+
+```python
+    if len(article_dict.get("content", "").split()) < 100:
+        return None
+
+    return article_dict
+```
+
+Minimum word count check — inline, no function call needed. `"".split()` returns an empty list with length 0, so `article_dict.get("content", "")` safely handles missing content without crashing. Articles under 100 words are stubs — too short to be meaningful for recommendations or RAG. Return `None` to reject.
+
+If all checks pass, return the cleaned dictionary. The caller receives either a clean dict or `None` — two possible outcomes, no ambiguity.
+
+---
+
+## Part 2 — enricher.py Line by Line
+
+The enricher adds computed fields that don't exist in the raw data but are needed constantly by downstream systems. Compute once, store permanently, never recompute.
+
+```python
+import datetime
+import math
+import re
+import langdetect
+from etl.schema import ArticleSchema
+```
+
+`math` for `ceil()` — reading time rounded up. `re` for regex word counting. `langdetect` for language detection. `ArticleSchema` — the enricher's output type. Every `enrich()` call returns an `ArticleSchema` object.
+
+---
+
+### `count_words(content)`
+
+```python
+def count_words(content):
+    words = re.findall(r'\b\w+\b', content)
+    return len(words)
+```
+
+`re.findall(r'\b\w+\b', content)` — finds all word tokens in the text. `\b` is a word boundary, `\w+` matches one or more word characters (letters, digits, underscore). This correctly handles punctuation — `"hello, world!"` returns `["hello", "world"]`, not `["hello,", "world!"]`. Returns an integer count.
+
+---
+
+### `enrich(article_dict)`
+
+```python
+def enrich(article_dict):
+    words = count_words(article_dict['content'])
+    article_dict['word_count'] = words
+    article_dict['reading_time'] = math.ceil(words / 200)
+```
+
+`math.ceil(words / 200)` — average reading speed is 200 words per minute. `ceil()` rounds up — a 350 word article is a 2 minute read, not 1.75. Stored as an integer in DuckDB's `INTEGER` column.
+
+```python
+    try:
+        article_dict['language'] = langdetect.detect(article_dict['content'])
+    except:
+        article_dict['language'] = "unknown"
+```
+
+`langdetect.detect()` returns a language code — `"en"`, `"de"`, `"ja"`, etc. It can throw `LangDetectException` on very short or garbled text with no detectable language. The try/except defaults to `"unknown"` rather than crashing. The cleaner already filters under 100 words so this rarely triggers — but defensive programming.
+
+```python
+    article_dict['processed_at'] = datetime.datetime.now()
+    article_dict['updated_at'] = article_dict['processed_at']
+```
+
+`processed_at` — the exact moment the ETL layer processed this article. Different from `scraped_at` (when the spider collected it) and `published_at` (when the original author published it). Three timestamps tracking the article's journey.
+
+`updated_at` — defaults to `processed_at` on first insert. When the article is re-scraped and its content changes, `updated_at` gets bumped. Lets you detect "same URL, updated content."
+
+```python
+    article = ArticleSchema(
+        source=article_dict.get("source"),
+        source_id=article_dict.get("source_id"),
+        ...
+        embedding_id=None
+    )
+    return article
+```
+
+Creates and returns an `ArticleSchema` object with all fields populated. `embedding_id=None` — this field will be filled later by the embedding layer when ChromaDB generates a vector for this article. The ETL layer doesn't know or care about embeddings — that's the next layer's job.
+
+---
+
+## Part 3 — consumer.py Line by Line
+
+The consumer is the heart of the ETL layer. It runs in an infinite loop, reads messages from Redis Streams, and orchestrates the entire pipeline — MinIO fetch → cleaner → enricher → warehouse.
+
+---
+
+### Imports and S3 Client
+
+```python
+import json
+import boto3
+from ingestion.connections import db
+import config
+from etl.cleaner import cleaner
+from etl.enricher import enrich
+from etl.warehouse import insert_into_warehouse
+```
+
+Notice the import from `ingestion.connections` — the same Redis `db` connection used by the ingestion layer. The ETL consumer reads from the same Redis instance that the spiders wrote to. One Redis, two layers sharing it.
+
+```python
+s3_client = boto3.client(
+    "s3",
+    endpoint_url=config.MINIO_ENDPOINT,
+    aws_access_key_id=config.MINIO_ROOT_USER,
+    aws_secret_access_key=config.MINIO_ROOT_PASSWORD
+)
+```
+
+The same boto3 S3 client used in `lake_writer.py` for uploads, now used here for downloads. `get_object` to fetch, `put_object` to store — same client, same credentials, same endpoint. boto3 clients are thread-safe so this is created once at module level and reused.
+
+---
+
+### Consumer Group Setup
+
+```python
+STREAM_NAMES = ["raw/hackernews", "raw/arxiv", "raw/wikipedia"]
+CONSUMER_GROUP = "etl-workers"
+
+cg = db.consumer_group(CONSUMER_GROUP, STREAM_NAMES)
+```
+
+**This is the critical line.** `db.consumer_group()` creates a walrus `ConsumerGroup` object that manages ALL three streams simultaneously under one group name. You pass the group name and a list of all stream names in one call — not one consumer group per stream.
+
+This is different from raw Redis where you'd run `XGROUP CREATE` separately for each stream. Walrus wraps all three into one object for convenience.
+
+```python
+try:
+    cg.create()
+    print(f"Consumer group '{CONSUMER_GROUP}' created for all streams")
+except Exception:
+    pass
+```
+
+`cg.create()` runs `XGROUP CREATE` on all three streams simultaneously. Wrapped in `try/except` because Redis throws an error if the group already exists — this is normal on every restart after the first run. `pass` silently ignores the error and continues. The group is already there, that's fine.
+
+---
+
+### Understanding Consumer Groups — Why They Exist
+
+Without a consumer group, if you read from a stream with `XREAD`, every call gives you messages from a fixed position — you'd have to manually track where you left off, and two workers reading simultaneously would both get the same messages, processing everything twice.
+
+A consumer group solves three problems simultaneously:
+
+**Problem 1 — Position tracking.** The group remembers the last delivered message ID across restarts. When the consumer restarts, it picks up exactly where it left off — no messages missed, no messages double-processed.
+
+**Problem 2 — Multi-worker coordination.** Multiple workers can join the same group. Redis ensures each message goes to exactly one worker — Worker A gets message 1, Worker B gets message 2. Neither gets the same message. This is how you scale ETL horizontally — add more workers to the group, Redis distributes automatically.
+
+**Problem 3 — The pending list and acknowledgements.** When a message is delivered to a worker, Redis moves it to a **pending entries list** — a separate internal tracking structure. The message stays pending until the worker explicitly acknowledges it with `XACK`. If the worker crashes before acknowledging, the message stays pending forever. On restart, the consumer can query the pending list and reprocess any stuck messages. This gives you **at-least-once processing** — a message is always processed, even across crashes.
+
+```
+Message delivered to worker → moves to pending list
+Worker processes successfully → XACK → removed from pending
+Worker crashes → message stays in pending → reprocessed on restart
+```
+
+The `>` symbol passed when reading means "give me messages not yet delivered to anyone in this group." Passing `0` instead would give pending messages — used during crash recovery.
+
+---
+
+### `fetch_from_minio(minio_path)`
+
+```python
+def fetch_from_minio(minio_path):
+    response = s3_client.get_object(Bucket=config.MINIO_BUCKET_RAW, Key=minio_path)
+    raw_json = response["Body"].read().decode("utf-8")
+    return json.loads(raw_json)
+```
+
+`s3_client.get_object()` — HTTP GET request to MinIO. `Bucket` is the bucket name (`raw`), `Key` is the full path string from the Redis message (`raw/hackernews/2026-03-08T16:02:57/59d33acd.json`).
+
+`response["Body"]` — the response body is a streaming object, not a string. `.read()` reads all bytes. `.decode("utf-8")` converts bytes to a Python string.
+
+`json.loads(raw_json)` — deserializes the JSON string back into a Python dictionary. This dict has the same structure as the `RawArticle` that was serialized during ingestion — `source`, `url`, `title`, `author`, `content`, `tags`, `published_at`, `scraped_at`.
+
+---
+
+### `process_message(stream_name, message_id, fields)`
+
+```python
+def process_message(stream_name, message_id, fields):
+    fields = {
+        k.decode() if isinstance(k, bytes) else k: 
+        v.decode() if isinstance(v, bytes) else v
+        for k, v in fields.items()
+    }
+```
+
+Walrus returns Redis data as raw bytes. `b"minio_path"` not `"minio_path"`. `b"raw/hackernews/..."` not `"raw/hackernews/..."`. This dictionary comprehension decodes every key and value — `isinstance(k, bytes)` checks if it's bytes, `.decode()` converts to string, the `else k` passes through anything already a string. Applied to both keys and values.
+
+```python
+    minio_path = fields.get("minio_path")
+    if not minio_path:
+        return False
+```
+
+Extract the MinIO path from the message. If somehow a message arrived without a `minio_path` field — malformed message — return `False` immediately. Guard clause pattern again.
+
+```python
+    try:
+        article_dict = fetch_from_minio(minio_path)
+    except Exception as e:
+        print(f"[{stream_name}] Failed to fetch from MinIO: {e}")
+        return False
+```
+
+Fetch the raw JSON from MinIO. Wrapped in try/except — MinIO could be temporarily unavailable, the file could have been deleted, network could hiccup. Any failure returns `False`. The consumer will acknowledge and skip rather than retrying infinitely — for production, a retry with exponential backoff would go here.
+
+```python
+    cleaned = cleaner(article_dict)
+    if cleaned is None:
+        return False
+```
+
+Pass the dict to the cleaner. If `None` comes back — article failed validation, too short, missing fields, invalid URL — return `False`. The caller will acknowledge the message and skip it. No point retrying a structurally bad article.
+
+```python
+    try:
+        article = enrich(cleaned)
+    except Exception as e:
+        return False
+
+    try:
+        insert_into_warehouse(article)
+    except Exception as e:
+        return False
+
+    return True
+```
+
+Enrich the clean dict, insert the `ArticleSchema` into DuckDB. Both wrapped in try/except. Return `True` only if everything succeeded end to end.
+
+---
+
+### `run()` — The Main Loop
+
+```python
+def run():
+    print("ETL consumer started. Listening to streams...")
+
+    while True:
+        results = cg.read(count=1, block=5000)
+```
+
+`while True` — runs forever until interrupted with Ctrl+C.
+
+`cg.read(count=1, block=5000)` — reads from ALL THREE streams in a single Redis command. `count=1` means up to 1 message per stream per call — so maximum 3 messages per iteration, one from each stream. `block=5000` — if no messages exist on any stream, wait up to 5000 milliseconds (5 seconds) before returning. During those 5 seconds the process is sleeping, using zero CPU. The moment any new message arrives on any stream, Redis wakes the consumer immediately.
+
+This is a **blocking read** — efficient, no spinning, no busy-waiting.
+
+```python
+        if not results:
+            continue
+```
+
+If `results` is empty or `None` — no messages on any stream within the 5 second window — loop back and wait again.
+
+```python
+        for stream_name, messages in results:
+            if isinstance(stream_name, bytes):
+                stream_name = stream_name.decode()
+
+            for message_id, fields in messages:
+                if isinstance(message_id, bytes):
+                    message_id = message_id.decode()
+```
+
+`cg.read()` returns `[(stream_name, [(message_id, {fields})])]` — a list of tuples, one per stream that had messages. The outer loop iterates streams. The inner loop iterates messages within each stream (we asked for `count=1` so usually one message per stream).
+
+Both `stream_name` and `message_id` come back as bytes from Redis — decoded to strings for readability in print statements and for use as dictionary keys.
+
+```python
+                success = process_message(stream_name, message_id, fields)
+
+                stream_attr = stream_name.replace("/", "_").replace("-", "_")
+                stream_obj = getattr(cg, stream_attr)
+                stream_obj.ack(message_id)
+```
+
+Call `process_message` — returns `True` or `False`.
+
+Then **always acknowledge** — whether the article was processed successfully or rejected. This is a deliberate choice. If the cleaner rejected the article, re-reading and re-cleaning it will produce the same rejection. There's no point keeping it in pending. Acknowledge and move on.
+
+`stream_name.replace("/", "_")` — walrus exposes individual streams as attributes on the consumer group object. `raw/hackernews` becomes the attribute `cg.raw_hackernews`. The replacement converts the path separator to underscores to match Python attribute naming. `getattr(cg, stream_attr)` dynamically accesses the attribute by name.
+
+```python
+                if success:
+                    print(f"[{stream_name}] Successfully processed {message_id}")
+                else:
+                    print(f"[{stream_name}] Message {message_id} rejected or failed")
+```
+
+Print outcome per message. In production this would be structured logging to a log aggregation system. For Mindful, stdout is sufficient.
+
+---
+
+## Bugs Fixed Today
+
+| Bug | Cause | Fix |
+|-----|-------|-----|
+| `Values not provided for parameter 16` | `source_id` missing from INSERT tuple | Added `article.source_id` to INSERT in correct column position |
+| HN articles all rejected | Empty content stored in MinIO | Added `if content == "": continue` after trafilatura extraction, outside try/except |
+| Cleaner rejecting HN text-only articles | URL validation rejecting empty URLs | Changed URL check — only validate URL if it exists, allow empty URL if content present |
+| `pycache` stale bytecode | Rapid file edits not invalidating cache | Deleted `__pycache__` directory, forced recompile from source |
+| Walrus returns bytes | Redis stores everything as bytes internally | Added bytes decoding for stream names, message IDs, and field keys/values |
+
+---
+
+## Verified End-to-End Results
+
+```
+DuckDB warehouse query:
+[('arxiv', 1219), ('wikipedia', 16), ('hacker_news', 1)]
+
+Sample rows:
+('RoboPocket: Improve Robot Policies Instantly with Your Phone', 227, 2, 'en')
+('Attention (machine learning)', 206, 2, 'en')
+('POET-X: Memory-efficient LLM Training...', 141, 1, 'en')
+```
+
+Language detection working, word count correct, reading time computed, data clean and queryable.
+
+---
+
+## Current ETL Layer Structure
+
+```
+etl/
+├── __init__.py
+├── schema.py          ✅ ArticleSchema class
+├── cleaner.py         ✅ HTML stripping, validation, normalisation
+├── enricher.py        ✅ word count, reading time, language, timestamps
+├── warehouse.py       ✅ DuckDB connection, deduplication, INSERT
+├── consumer.py        ✅ Redis Streams, MinIO fetch, pipeline orchestration
+└── main.py            ✅ entry point — calls consumer.run()
+```
+
+---
+
+## Tomorrow — Embedding Layer
+
+DuckDB has 1200+ clean articles. Next step — the intelligence layer:
+
+- Read articles from DuckDB
+- Chunk long content for embedding
+- Generate vector embeddings using a sentence transformer model
+- Store embeddings in ChromaDB
+- Write `embedding_id` back to DuckDB `articles_warehouse`
+
+Once embeddings exist, semantic search becomes possible — the foundation for both the recommendation engine and the RAG chatbot.
+
+---
+
+*Mindful Build Log — Day 5 of 56*
+*Next: Day 6 — Embedding Layer, ChromaDB & Semantic Search Foundation*
