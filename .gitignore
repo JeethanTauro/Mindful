@@ -52,3 +52,5 @@ logs/
 Thumbs.db
 
 warehouse_check.py
+
+etl/data/
