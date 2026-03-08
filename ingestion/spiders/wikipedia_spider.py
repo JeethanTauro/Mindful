@@ -44,7 +44,7 @@ def fetch_pages():
 def map_to_schema(list_of_pages):
     list_raw_articles=[]
     for page in list_of_pages:
-        raw_article = RawArticle(source="wikipedia", title=page.title,author="wikipedia",content=page.summary,url=page.url,tags=page.categories[:5] ,published_at=None)
+        raw_article = RawArticle(source_id=str(page.pageid),source="wikipedia", title=page.title,author="wikipedia",content=page.summary,url=page.url,tags=page.categories[:5] ,published_at=None)
         list_raw_articles.append(raw_article)
     return list_raw_articles
 

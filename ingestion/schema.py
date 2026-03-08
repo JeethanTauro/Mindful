@@ -6,9 +6,10 @@ from dataclasses import field
 #this is for the spiders that are going to scrape the websites so that they don't scrape random things
 
 class RawArticle:
-    def __init__(self, source, url,  title, author,content, tags, published_at):
+    def __init__(self, source_id ,source, url,  title, author,content, tags, published_at):
 
         #fields come first
+        self.source_id = source_id
         self.source = source # the source is hacker news, wikipedia or arxiv
         self.url = url #the url from which the data was pulled from
         self.title = title #title of the article

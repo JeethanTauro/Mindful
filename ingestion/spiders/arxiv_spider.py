@@ -56,6 +56,7 @@ def map_to_schema(results):
         for paper in papers:
 
             article = RawArticle(
+                source_id=paper["arxiv_id"],
                 source=source,
                 url=paper["pdf_url"],
                 title=paper["title"],
