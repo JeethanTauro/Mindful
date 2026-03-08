@@ -11,7 +11,12 @@ con.execute("CREATE TABLE IF NOT EXISTS articles_warehouse (id VARCHAR,source_id
 
 #if we are doing stream processing one article at a time
 def insert_into_warehouse(article):
-    con.execute("SELECT * FROM articles_warehouse WHERE url = ? ",[article.url])
+    if article.url:
+        # normal case — deduplicate by URL
+        con.execute("SELECT * FROM articles_warehouse WHERE url = ?", [article.url])
+    else:
+        # text-only HN articles — deduplicate by source_id
+        con.execute("SELECT * FROM articles_warehouse WHERE source_id = ?", [article.source_id])
     if con.fetchone() is None:
         con.execute("INSERT INTO articles_warehouse VALUES ( ?, ? , ? , ? , ? , ? , ? , ? , ? , ? , ? ,? , ? , ? , ? , ? )", (article.id,article.source_id,article.source,article.url,article.title,article.author,article.content,article.word_count,article.reading_time,article.language,article.tags,article.published_at,article.scraped_at,article.processed_at,article.updated_at,article.embedding_id))
 

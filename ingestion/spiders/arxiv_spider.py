@@ -11,7 +11,16 @@ categories = [
         "cs.LG",     # Machine Learning
         "cs.CV",     # Computer Vision
         "cs.CL",     # Natural Language Processing
-        "stat.ML"    # Statistical Machine Learning
+        "stat.ML",    # Statistical Machine Learning
+        "cs.SE",      #Software Engineering
+        "cs.CR", # Cryptography and Security
+        "cs.DB", # Databases
+        "cs.DC", # Distributed Computing
+        "cs.NI",  #Networking
+        "econ.GN", #General Economics
+        "q-fin.TR", #Trading and Market Microstructure
+        "physics.data-an", #Data Analysis in Physics
+        "q-bio.GN"  #Genomics
     ]
 def fetch_content():
 
@@ -22,7 +31,7 @@ def fetch_content():
         #constructs a search api
         search = arxiv.Search(
             query=f"cat:{category}",
-            max_results=10,
+            max_results=100,
             sort_by=arxiv.SortCriterion.SubmittedDate
         )
 
@@ -81,3 +90,7 @@ if __name__ == "__main__":
     print("\n")
     upload(list_raw_articles,"arxiv")
     print("uploaded to minio by arxiv spider")
+
+'''
+after the bulk scrape, we have to scrape on daily basis, so then we start using the date filter where we scrape papers submitted in the last 24 hours only
+'''

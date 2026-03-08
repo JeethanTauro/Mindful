@@ -10,21 +10,20 @@ categories = [
     "Artificial Intelligence",
     "Cybersecurity",
     "Programming Languages",
+    "Venture capital",
+    "Stock market",
+    "Cryptocurrency",
+    "Macroeconomics",
+    "World War II",
+    "Cold War",
+    "Globalization",
+    "Democracy",
 ]
-'''
-"Distributed systems",
-    "Data Science",
-    "Agentic AI",
-    "Database Systems",
-    "Cloud technology",
-    "Neural Networks",
-    "Natural Language Processing"
-'''
 def fetch_pages():
     list_of_pages=[]
     for category in categories:
         try:
-            list_titles = wikipedia.search(category)[:5]
+            list_titles = wikipedia.search(category)[:15]
             for title in list_titles:
                 try:
                     page = wikipedia.page(title)
@@ -44,7 +43,7 @@ def fetch_pages():
 def map_to_schema(list_of_pages):
     list_raw_articles=[]
     for page in list_of_pages:
-        raw_article = RawArticle(source_id=str(page.pageid),source="wikipedia", title=page.title,author="wikipedia",content=page.summary,url=page.url,tags=page.categories[:5] ,published_at=None)
+        raw_article = RawArticle(source_id=str(page.pageid),source="wikipedia", title=page.title,author="wikipedia",content=page.content,url=page.url,tags=page.categories[:5] ,published_at=None)
         list_raw_articles.append(raw_article)
     return list_raw_articles
 

@@ -77,7 +77,7 @@ def hit_item_endpoint(list_ids):
                     else:
                         continue
 
-                    raw = RawArticle(source_id= str(r.get("id", "")),source="Hacker_News", url=url, title=title, author=author, content=content, tags=["hackernews"],
+                    raw = RawArticle(source_id= str(r.get("id", "")),source="hackernews", url=url, title=title, author=author, content=content, tags=["hackernews"],
                              published_at=datetime.fromtimestamp(r["time"]) if r.get("time") else None)
                     list_raw_articles.append(raw)
                     sleep(1)

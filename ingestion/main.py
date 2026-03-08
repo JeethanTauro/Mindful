@@ -17,7 +17,7 @@ def arxiv_spider_run():
 #runs entire hackernews spider from start to finish
 def hackernews_spider_run():
     ids = hackernews.fetch_ids()
-    results = hackernews.flatten_list_ids(ids)[:10]
+    results = hackernews.flatten_list_ids(ids)
     list_raw_articles = hackernews.hit_item_endpoint(results)
     upload(list_raw_articles,"hackernews")
     return len(list_raw_articles)
@@ -25,7 +25,7 @@ def hackernews_spider_run():
 
 #runs entire wikipedia spider from start to finsh
 def wikipedia_spider_run():
-    list_of_pages = wikipedia_spider.fetch_pages()[:5]
+    list_of_pages = wikipedia_spider.fetch_pages()[:15]
     list_raw_articles = wikipedia_spider.map_to_schema(list_of_pages)
     upload(list_raw_articles,"wikipedia")
     return len(list_raw_articles)
