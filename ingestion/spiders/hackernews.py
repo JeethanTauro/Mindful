@@ -55,7 +55,7 @@ def hit_item_endpoint(list_ids):
                 if r.status_code == 200:
                     r = r.json()
                     #can be text or url but it has to be a story
-                    if (r.get("text","") != " " or r.get("url","") != "") and r.get("type")=="story":
+                    if (r.get("text","") != "" or r.get("url","") != "") and r.get("type")=="story":
                         author = r.get("by","")
                         title = r.get("title","")
                         content  = r.get("text","")
@@ -69,6 +69,8 @@ def hit_item_endpoint(list_ids):
 
                             except Exception as e:
                                 print(e)
+                            if content == "":
+                                continue
 
 
                     #if both text and url are not there then skip this article id
