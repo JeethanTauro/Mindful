@@ -26,7 +26,7 @@ s3_client = boto3.client(
 )
 
 # stream names
-STREAM_NAMES = ["raw/hackernews", "raw/arxiv", "raw/wikipedia"]
+STREAM_NAMES = ["raw/hackernews", "raw/arxiv", "raw/wikipedia","raw/latest_tech_news-writer","raw/tech_case_study-writer","raw/system-design-writer"]
 CONSUMER_GROUP = "etl-workers"
 
 # walrus ConsumerGroup takes ALL streams at once — not one stream at a time
