@@ -21,3 +21,6 @@ REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 HACKER_TOP_STORIES=os.getenv("HACKER_TOP_STORIES", "https://hacker-news.firebaseio.com/v0/topstories.json?print=pretty")
 HACKER_NEW_STORIES=os.getenv("HACKER_NEW_STORIES","https://hacker-news.firebaseio.com/v0/newstories.json?print=pretty")
 HACKER_NEWS_ITEM=os.getenv("HACKER_NEWS_ITEM","https://hacker-news.firebaseio.com/v0/item/47252349.json?print=pretty")
+
+#API-Groq
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
