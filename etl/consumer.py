@@ -15,6 +15,7 @@ import config
 from etl.cleaner import cleaner
 from etl.enricher import enrich
 from etl.warehouse import insert_into_warehouse
+from etl.vector_ingestion import insert_into_vector_db
 
 
 # s3 client to fetch raw json files from minio
@@ -91,6 +92,13 @@ def process_message(stream_name, message_id, fields):
         insert_into_warehouse(article)
     except Exception as e:
         print(f"[{stream_name}] Warehouse insert failed: {e}")
+        return False
+
+    #insert into vectordb
+    try:
+        insert_into_vector_db(article)
+    except Exception as e:
+        print(f"[{stream_name}] Vector insert failed: {e}")
         return False
 
     return True
