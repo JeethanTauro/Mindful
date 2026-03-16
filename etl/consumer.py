@@ -27,7 +27,19 @@ s3_client = boto3.client(
 )
 
 # stream names
-STREAM_NAMES = ["raw/hackernews", "raw/arxiv", "raw/wikipedia","raw/latest_tech_news-writer","raw/tech_case_study-writer","raw/system-design-writer"]
+STREAM_NAMES = [
+    "raw/hackernews",
+    "raw/arxiv",
+    "raw/wikipedia",
+    "raw/latest_tech_news-writer",
+    "raw/tech_case_study-writer",
+    "raw/system-design-writer",
+    "raw/society_worldview-writer",
+    "raw/human_psychology-writer",
+    "raw/latest_finance-writer",
+    "raw/deep_finance-writer",
+    "raw/career_productivity-writer",
+]
 CONSUMER_GROUP = "etl-workers"
 
 # walrus ConsumerGroup takes ALL streams at once — not one stream at a time
@@ -144,6 +156,3 @@ def run():
                 else:
                     print(f"[{stream_name}] Message {message_id} rejected or failed — acknowledged and skipped")
 
-
-if __name__ == "__main__":
-    run()
