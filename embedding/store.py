@@ -1,6 +1,5 @@
 #now once u get the embedding store it in the vector store
 import chromadb
-from etl.warehouse import con
 import uuid
 import os
 

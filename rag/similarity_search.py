@@ -1,4 +1,3 @@
-from importlib.metadata import metadata
 
 from embedding.store import collection
 def search(embeddings):
