@@ -18,6 +18,12 @@ from etl.warehouse import insert_into_warehouse
 from etl.vector_ingestion import insert_into_vector_db
 
 
+MAX_RETRIES = 3
+DEAD_LETTER_STREAM = "etl_dead_letter"
+
+import socket
+
+CONSUMER_NAME = f"worker-{socket.gethostname()}"
 # s3 client to fetch raw json files from minio
 s3_client = boto3.client(
     "s3",
@@ -115,44 +121,67 @@ def process_message(stream_name, message_id, fields):
 
     return True
 
+def process_pending(stream_name):
+    stream_attr = stream_name.replace("/", "_").replace("-", "_")
+    stream_obj = getattr(cg, stream_attr)
+
+    result = stream_obj.autoclaim(
+        CONSUMER_NAME,
+        min_idle_time=30000,
+        start_id="0-0",
+        count=10
+    )
+
+    if not result:
+        return
+
+    next_id, messages, deleted_ids = result
+
+    for message_id, fields in messages:
+
+        if isinstance(message_id, bytes):
+            message_id = message_id.decode()
+
+        success = process_message(stream_name, message_id, fields)
+
+        if success:
+            stream_obj.ack(message_id)
+            print(f"[{stream_name}] Retried pending {message_id} successfully")
+        else:
+            print(f"[{stream_name}] Pending message {message_id} failed again")
 
 def run():
-    '''
-    main consumer loop
-    reads from all 3 streams simultaneously using cg.read()
-    processes each message, acknowledges when done
-    runs forever until interrupted
-    '''
     print("ETL consumer started. Listening to streams...")
 
     while True:
-        # cg.read() reads from ALL streams at once
-        # returns: [('stream-name', [(msg_id, {fields})]), ...]
-        # block=5000 — wait up to 5 seconds if no messages, then loop again
-        results = cg.read(count=1, block=5000)
+
+        # 1 — FIRST process pending messages
+        for stream_name in STREAM_NAMES:
+            process_pending(stream_name)
+
+        # 2 — THEN read new messages
+        results = cg.read(count=10, block=5000)
 
         if not results:
-            continue  # no messages on any stream, loop again
+            continue
 
         for stream_name, messages in results:
-            # walrus returns stream names as bytes — decode
+
             if isinstance(stream_name, bytes):
                 stream_name = stream_name.decode()
 
             for message_id, fields in messages:
+
                 if isinstance(message_id, bytes):
                     message_id = message_id.decode()
 
                 success = process_message(stream_name, message_id, fields)
 
-                # get the specific stream object from consumer group and acknowledge
-                # walrus exposes streams as attributes — raw/hackernews → cg.raw_hackernews
                 stream_attr = stream_name.replace("/", "_").replace("-", "_")
                 stream_obj = getattr(cg, stream_attr)
-                stream_obj.ack(message_id)
 
                 if success:
+                    stream_obj.ack(message_id)
                     print(f"[{stream_name}] Successfully processed {message_id}")
                 else:
-                    print(f"[{stream_name}] Message {message_id} rejected or failed — acknowledged and skipped")
-
+                    print(f"[{stream_name}] Failed {message_id} — left pending")
