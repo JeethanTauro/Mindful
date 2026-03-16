@@ -7,7 +7,8 @@ from rag.similarity_search import search
 from rag.reranker import  rerank
 from rag.context_builder import context_builder
 from rag.chat import llm_chat
-
+from rag.router import router
+from rag.casual_query import casual_query
 
 def run(query,memory):
     if memory is None:
@@ -16,6 +17,11 @@ def run(query,memory):
     safe, msg = guard(query)
     if not safe:
         return {"answer": msg, "safe": False}
+
+    route = router(query)
+    if route == "CASUAL_QUERY":
+        return casual_query(query,memory)
+
 
     enhanced_query = enhancer(query, memory)
     embeddings = embed_query(enhanced_query)
