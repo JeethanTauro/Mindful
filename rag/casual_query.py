@@ -28,4 +28,4 @@ def casual_query(query,memory):
         )
     ]
     llm_output = llm.invoke(messages)
-    return {"answer": llm_output.content, "safe": True}
+    return {"answer": llm_output.content, "safe": True, "sources":[]}

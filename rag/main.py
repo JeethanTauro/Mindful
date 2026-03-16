@@ -16,7 +16,7 @@ def run(query,memory):
 
     safe, msg = guard(query)
     if not safe:
-        return {"answer": msg, "safe": False}
+        return {"answer": msg, "safe": False, "sources": []}
 
     route = router(query)
     if route == "CASUAL_QUERY":
@@ -30,7 +30,7 @@ def run(query,memory):
     context = context_builder(chunks, metadata, enhanced_query)
     output = llm_chat(context, memory)
 
-    return {"answer": output, "safe": True}
+    return {"answer": output, "safe": True, "sources":context["sources"]}
 
 
 
