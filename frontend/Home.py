@@ -1,13 +1,18 @@
 import uuid
 from datetime import datetime, timedelta
 
+import duckdb
 import streamlit as st
 import sys
 import os
 from streamlit_cookies_manager import EncryptedCookieManager
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from etl.warehouse import con
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "mindful.db")
+@st.cache_resource
+def get_connection():
+    return duckdb.connect(DB_PATH, read_only=True)
+con = get_connection()
 
 st.set_page_config(page_title="Mindful", page_icon="🧠", layout="wide")
 
