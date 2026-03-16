@@ -1,6 +1,11 @@
 import requests
 import streamlit as st
 
+# frontend/pages/Chat.py — add at the top
+import extra_streamlit_components as stx
+cookie_manager = stx.CookieManager()
+user_id = cookie_manager.get("mindful_user_id")
+
 # initialize memory
 if "memory" not in st.session_state:
     st.session_state.memory = []
