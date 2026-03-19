@@ -5,9 +5,6 @@ import requests
 import config
 from ingestion.lake_writer import upload
 from ingestion.schema import RawArticle
-import json
-import boto3
-from walrus import Database  # A subclass of the redis-py Redis client.
 '''
 first hit the api -> get 1000 ids
 for each id:
