@@ -18,12 +18,13 @@ from etl.warehouse import insert_into_warehouse
 from etl.vector_ingestion import insert_into_vector_db
 
 
-MAX_RETRIES = 3
-DEAD_LETTER_STREAM = "etl_dead_letter"
 
 import socket
 
 CONSUMER_NAME = f"worker-{socket.gethostname()}"
+MAX_RETRIES = 3
+DEAD_LETTER_STREAM = "etl_dead_letter"
+
 # s3 client to fetch raw json files from minio
 s3_client = boto3.client(
     "s3",
@@ -121,6 +122,14 @@ def process_message(stream_name, message_id, fields):
 
     return True
 
+
+def move_to_dead_letter(message_id, fields):
+    dead_stream = db.Stream(DEAD_LETTER_STREAM)
+    fields["failed_message_id"] = message_id
+    fields["reason"] = "exceeded max retries"
+    dead_stream.add(fields)
+    print(f"Message {message_id} moved to dead letter stream")
+
 def process_pending(stream_name):
     stream_attr = stream_name.replace("/", "_").replace("-", "_")
     stream_obj = getattr(cg, stream_attr)
@@ -138,9 +147,23 @@ def process_pending(stream_name):
     next_id, messages, deleted_ids = result
 
     for message_id, fields in messages:
-
         if isinstance(message_id, bytes):
             message_id = message_id.decode()
+
+        # check delivery count before retrying
+        pending_info = stream_obj.pending(consumer=CONSUMER_NAME)
+        delivery_count = next(
+            (p["times_delivered"] for p in pending_info if p["message_id"] == message_id), 0
+        )
+
+        if delivery_count >= MAX_RETRIES:
+            fields = {
+                k.decode() if isinstance(k, bytes) else k: v.decode() if isinstance(v, bytes) else v
+                for k, v in fields.items()
+            }
+            move_to_dead_letter(message_id, fields)
+            stream_obj.ack(message_id)
+            continue
 
         success = process_message(stream_name, message_id, fields)
 
@@ -148,8 +171,7 @@ def process_pending(stream_name):
             stream_obj.ack(message_id)
             print(f"[{stream_name}] Retried pending {message_id} successfully")
         else:
-            print(f"[{stream_name}] Pending message {message_id} failed again")
-
+            print(f"[{stream_name}] Pending {message_id} failed again — attempt {delivery_count}/{MAX_RETRIES}")
 def run():
     print("ETL consumer started. Listening to streams...")
 
