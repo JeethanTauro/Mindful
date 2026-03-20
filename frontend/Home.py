@@ -1,68 +1,34 @@
-import uuid
-from datetime import datetime, timedelta
-
-import duckdb
-import streamlit as st
 import sys
 import os
-from streamlit_cookies_manager import EncryptedCookieManager
+
+import requests
+import streamlit as st
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),"..", "data", "mindful.db")
-@st.cache_resource
-def get_connection():
-    return duckdb.connect(DB_PATH, read_only=True)
-con = get_connection()
+from frontend.utils import get_cookies, setup_user, fire_event, fetch_feed, record_article_open, resolve_read_or_bounce
 
 st.set_page_config(page_title="Mindful", page_icon="🧠", layout="wide")
 
-# ── UUID cookie management ──────────────────────────────────────────────────
+# ── Cookie + User Setup ───────────────────────────────────────────────────────
 
-
-cookies = EncryptedCookieManager(prefix="mindful_", password="mindful_secret_key")
-
+cookies = get_cookies()
 if not cookies.ready():
     st.stop()
 
-def get_or_create_uuid():
-    user_id = cookies.get("user_id")
-    if not user_id:
-        user_id = str(uuid.uuid4())
-        cookies["user_id"] = user_id
-        cookies.save()
-    return user_id
+user_id, session_id = setup_user(cookies)
 
-
-user_id = get_or_create_uuid()
-
-# ── Fetch all articles ───────────────────────────────────────────────────────
-
-@st.cache_data(ttl=300)
-def fetch_articles(limit=30):
-    rows = con.execute("""
-        SELECT id, title, author, source, word_count, reading_time, 
-               published_at, content, scraped_at
-        FROM articles_warehouse
-        ORDER BY scraped_at DESC
-        LIMIT ?
-    """, [limit]).fetchdf()
-    return rows
-
-# ── Fetch single article by ID ───────────────────────────────────────────────
+# ── Fetch article by ID (for direct URL navigation) ──────────────────────────
 
 def fetch_article_by_id(article_id):
-    row = con.execute("""
-        SELECT id, title, author, source, word_count, reading_time, 
-               published_at, content, scraped_at
-        FROM articles_warehouse
-        WHERE id = ?
-        LIMIT 1
-    """, [article_id]).fetchdf()
-    if row.empty:
+    try:
+        response = requests.get(f"http://127.0.0.1:8000/mindful/article/{article_id}")
+        data = response.json()
+        return data if data else None
+    except Exception:
         return None
-    return row.iloc[0].to_dict()
 
-# ── Header ───────────────────────────────────────────────────────────────────
+# ── Header ────────────────────────────────────────────────────────────────────
 
 st.markdown("""
     <h1 style='text-align: center; font-size: 3rem; margin-bottom: 0;'>Mindful</h1>
@@ -72,7 +38,7 @@ st.markdown("""
     <hr/>
 """, unsafe_allow_html=True)
 
-# ── Article cards ────────────────────────────────────────────────────────────
+# ── Article card renderer ─────────────────────────────────────────────────────
 
 COLS = 3
 
@@ -96,10 +62,10 @@ def render_card(article):
         ">
             <div>
                 <div style="display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
-                    <span style="background:#2a2a2a; color:#aaa; padding:2px 10px; 
+                    <span style="background:#2a2a2a; color:#aaa; padding:2px 10px;
                                  border-radius:20px; font-size:0.72rem;">{source_tag}</span>
                 </div>
-                <p style="font-size:1rem; font-weight:600; margin:0 0 8px 0; 
+                <p style="font-size:1rem; font-weight:600; margin:0 0 8px 0;
                           line-height:1.4; color:#f0f0f0;">{article['title']}</p>
                 <p style="font-size:0.82rem; color:#888; margin:0; line-height:1.5;">
                     {preview}
@@ -112,17 +78,25 @@ def render_card(article):
     """, unsafe_allow_html=True)
 
     if st.button("Read →", key=f"read_{article['id']}"):
-        st.query_params["article_id"] = article["id"]   # set URL param
-        st.session_state["selected_article"] = article.to_dict()  # keep session for speed
+        # fire article_open event
+        fire_event(user_id, session_id, article["id"], "article_open", "feed")
+        # record open time for read/bounce resolution later
+        record_article_open(article["id"])
+        # store article in session for speed — avoids second db hit
+        st.session_state["selected_article"] = dict(article)
+        st.query_params["article_id"] = article["id"]
         st.rerun()
 
-# ── Article detail view ──────────────────────────────────────────────────────
+# ── Article detail renderer ───────────────────────────────────────────────────
 
 def render_article(article):
     if st.button("← Back to Feed"):
-        st.query_params.clear()                              # clear URL param
+        # resolve read vs bounce based on time spent
+        resolve_read_or_bounce(user_id, session_id)
+        # clear navigation state
+        st.query_params.clear()
         if "selected_article" in st.session_state:
-            del st.session_state["selected_article"]         # clear session state
+            del st.session_state["selected_article"]
         st.rerun()
 
     reading_time = f"{article['reading_time']} min read" if article.get("reading_time") else ""
@@ -137,17 +111,22 @@ def render_article(article):
     """, unsafe_allow_html=True)
     st.write(article["content"])
 
-# ── Routing logic ─────────────────────────────────────────────────────────────
+# ── Routing ───────────────────────────────────────────────────────────────────
 
 # Priority 1 — URL has article_id (direct link or chatbot redirect)
 if "article_id" in st.query_params:
     article_id = st.query_params["article_id"]
 
-    # use session state if available (faster), otherwise hit DuckDB
+
+    # use session state if available (faster), otherwise fetch from backend
     if "selected_article" in st.session_state and st.session_state["selected_article"]["id"] == article_id:
         article = st.session_state["selected_article"]
     else:
         article = fetch_article_by_id(article_id)
+        if article:
+            # user navigated directly via URL — fire open event
+            fire_event(user_id, session_id, article_id, "article_open", "feed")
+            record_article_open(article_id)
 
     if article:
         render_article(article)
@@ -161,10 +140,15 @@ elif "selected_article" in st.session_state:
 
 # Priority 3 — no article selected, show feed
 else:
-    df = fetch_articles()
-    rows = [df.iloc[i:i+COLS] for i in range(0, len(df), COLS)]
-    for row in rows:
-        cols = st.columns(COLS)
-        for col, (_, article) in zip(cols, row.iterrows()):
-            with col:
-                render_card(article)
+    articles = fetch_feed(user_id)
+
+    if not articles:
+        st.info("No articles found. Run the ingestion pipeline first.")
+    else:
+        # chunk articles into rows of COLS
+        rows = [articles[i:i+COLS] for i in range(0, len(articles), COLS)]
+        for row in rows:
+            cols = st.columns(COLS)
+            for col, article in zip(cols, row):
+                with col:
+                    render_card(article)
