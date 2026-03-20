@@ -1,8 +1,7 @@
 import datetime
 from ingestion.lake_writer import upload
 from concurrent.futures import ThreadPoolExecutor,as_completed
-from ingestion.spiders import arxiv_spider,hackernews,wikipedia_spider
-
+from spiders import hackernews, arxiv_spider, wikipedia_spider
 
 #list of the spider names
 spiders = ["arxiv_spider", "hackernews_spider", "wikipedia_spider"]
