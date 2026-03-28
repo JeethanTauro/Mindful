@@ -41,11 +41,8 @@ async def mindful_rag(q : Query):
 #push event payload into streams
 @app.post("/mindful/events")
 async def mindful_events(e : Events):
-    try:
-        push(e)
-        return {"status": "ok"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    push(e)
+    return {"status": "ok"}
 
 #upsert the user
 @app.post("/mindful/users")
