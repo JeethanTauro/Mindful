@@ -1,12 +1,13 @@
 import sys
 import os
+import uuid
 
 import requests
 import streamlit as st
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from frontend.utils import get_cookies, setup_user, fire_event
+from frontend.utils import get_cookies, setup_user, fire_event, MAX_MEMORY
 
 # ── Cookie + User Setup ───────────────────────────────────────────────────────
 
@@ -26,29 +27,24 @@ if "memory" not in st.session_state:
 for message in st.session_state.memory:
     with st.chat_message(message["role"]):
         if message["role"] == "assistant":
-            # strip sources block from answer — rendered separately below
             answer = message["content"]
             if "**Sources Used:**" in answer:
                 answer = answer.split("**Sources Used:**")[0].replace("**Answer:**", "").strip()
             st.markdown(answer)
 
-            # render sources as buttons so we can intercept the click and fire events
             sources = message.get("sources", [])
             if sources:
                 st.markdown("---")
                 st.caption("**Sources:**")
-                for s in sources:
+                for idx, s in enumerate(sources):
                     article_id = s.get("article_id")
                     title = s.get("title", "Unknown")
                     source_name = s.get("source", "")
 
                     if article_id:
-                        # button instead of markdown link — lets us fire event before navigating
-                        if st.button(f"→ {title} — {source_name}", key=f"src_{article_id}_{message.get('id','')}"):
-                            # fire article_open_from_chatbot event before navigating
+                        if st.button(f"→ {title} — {source_name}", key=f"src_{article_id}_{message.get('id', '')}_{idx}"):
                             fire_event(user_id, session_id, article_id, "article_open_from_chatbot", "rag_chatbot")
-                            # navigate to article detail on Home.py
-                            st.query_params["article_id"] = article_id
+                            st.session_state["chatbot_article_id"] = article_id
                             st.switch_page("Home.py")
                     else:
                         st.markdown(f"→ {title} — *{source_name}*")
@@ -60,21 +56,27 @@ for message in st.session_state.memory:
 user_input = st.chat_input("Ask Mindful anything...")
 
 if user_input:
-    # build clean memory without sources metadata — backend only needs role + content
-    clean_memory = [{"role": m["role"], "content": m["content"]} for m in st.session_state.memory]
+    # only send last MAX_MEMORY turns to backend — prevents token explosion
+    clean_memory = [
+        {"role": m["role"], "content": m["content"]}
+        for m in st.session_state.memory[-MAX_MEMORY:]
+    ]
 
-    try:
-        response = requests.post("http://127.0.0.1:8000/mindful/rag", json={
-            "query": user_input,
-            "memory": clean_memory
-        })
-        data = response.json()
-    except Exception as e:
-        st.error(f"Could not reach backend: {e}")
-        st.stop()
+    with st.spinner("Thinking..."):
+        try:
+            response = requests.post(
+                "http://127.0.0.1:8000/mindful/rag",
+                json={"query": user_input, "memory": clean_memory},
+                timeout=30
+            )
+            if response.status_code != 200:
+                st.error(f"Backend error: {response.status_code}")
+                st.stop()
+            data = response.json()
+        except Exception as e:
+            st.error(f"Could not reach backend: {e}")
+            st.stop()
 
-    # attach a unique id to each assistant message — used to key source buttons uniquely
-    import uuid
     st.session_state.memory.append({
         "role": "user",
         "content": user_input
@@ -85,5 +87,8 @@ if user_input:
         "content": data.get("answer", ""),
         "sources": data.get("sources", [])
     })
+
+    # trim memory to MAX_MEMORY turns to prevent unbounded growth
+    st.session_state.memory = st.session_state.memory[-MAX_MEMORY:]
 
     st.rerun()

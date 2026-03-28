@@ -22,8 +22,15 @@ user_id, session_id = setup_user(cookies)
 
 def fetch_article_by_id(article_id):
     try:
-        response = requests.get(f"http://127.0.0.1:8000/mindful/article/{article_id}")
+        response = requests.get(
+            f"http://127.0.0.1:8000/mindful/article/{article_id}",
+            timeout=10
+        )
+        if response.status_code != 200:
+            return None
         data = response.json()
+        if isinstance(data, dict) and data.get("status") == "error":
+            return None
         return data if data else None
     except Exception:
         return None
@@ -78,11 +85,8 @@ def render_card(article):
     """, unsafe_allow_html=True)
 
     if st.button("Read →", key=f"read_{article['id']}"):
-        # fire article_open event
         fire_event(user_id, session_id, article["id"], "article_open", "feed")
-        # record open time for read/bounce resolution later
         record_article_open(article["id"])
-        # store article in session for speed — avoids second db hit
         st.session_state["selected_article"] = dict(article)
         st.query_params["article_id"] = article["id"]
         st.rerun()
@@ -91,12 +95,12 @@ def render_card(article):
 
 def render_article(article):
     if st.button("← Back to Feed"):
-        # resolve read vs bounce based on time spent
         resolve_read_or_bounce(user_id, session_id)
-        # clear navigation state
         st.query_params.clear()
         if "selected_article" in st.session_state:
             del st.session_state["selected_article"]
+        if "cached_feed" in st.session_state:
+            del st.session_state["cached_feed"]  # force fresh feed with updated vector
         st.rerun()
 
     reading_time = f"{article['reading_time']} min read" if article.get("reading_time") else ""
@@ -113,18 +117,21 @@ def render_article(article):
 
 # ── Routing ───────────────────────────────────────────────────────────────────
 
+# handle chatbot navigation — session_state persists across pages, query_params don't
+if "chatbot_article_id" in st.session_state:
+    article_id = st.session_state.pop("chatbot_article_id")
+    st.query_params["article_id"] = article_id
+    st.rerun()
+
 # Priority 1 — URL has article_id (direct link or chatbot redirect)
 if "article_id" in st.query_params:
     article_id = st.query_params["article_id"]
 
-
-    # use session state if available (faster), otherwise fetch from backend
     if "selected_article" in st.session_state and st.session_state["selected_article"]["id"] == article_id:
         article = st.session_state["selected_article"]
     else:
         article = fetch_article_by_id(article_id)
         if article:
-            # user navigated directly via URL — fire open event
             fire_event(user_id, session_id, article_id, "article_open", "feed")
             record_article_open(article_id)
 
@@ -140,12 +147,16 @@ elif "selected_article" in st.session_state:
 
 # Priority 3 — no article selected, show feed
 else:
-    articles = fetch_feed(user_id)
+    # cache feed in session so button keys don't change on rerender
+    if "cached_feed" not in st.session_state:
+        with st.spinner("Loading your feed..."):
+            st.session_state["cached_feed"] = fetch_feed(user_id)
+
+    articles = st.session_state["cached_feed"]
 
     if not articles:
         st.info("No articles found. Run the ingestion pipeline first.")
     else:
-        # chunk articles into rows of COLS
         rows = [articles[i:i+COLS] for i in range(0, len(articles), COLS)]
         for row in rows:
             cols = st.columns(COLS)
