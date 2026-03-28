@@ -30,13 +30,12 @@ def global_feed():
             SELECT id, title, author, source, word_count, reading_time,
                    published_at, content, scraped_at
             FROM articles_warehouse
-            ORDER BY published_at DESC
+            ORDER BY scraped_at DESC
             LIMIT 30
         """).fetchdf()
         return rows.to_dict(orient="records")
     finally:
         con.close()
-
 
 def fetch_articles_by_ids(ids):
     con = duckdb.connect(DB_PATH, read_only=True)
@@ -48,10 +47,12 @@ def fetch_articles_by_ids(ids):
             FROM articles_warehouse
             WHERE id IN ({placeholders})
         """, ids).fetchdf()
+        id_order = {id_: i for i, id_ in enumerate(ids)}
+        rows["sort_order"] = rows["id"].map(id_order)
+        rows = rows.sort_values("sort_order").drop(columns="sort_order")
         return rows.to_dict(orient="records")
     finally:
         con.close()
-
 
 def personalised_feed(user):
     feed_size = 30
@@ -64,9 +65,11 @@ def personalised_feed(user):
     # 60% — ChromaDB ANN search using interest vector
     chroma_result = collection.query(
         query_embeddings=[interest_vector.tolist() if hasattr(interest_vector, 'tolist') else interest_vector],
-        n_results=personalized_count
+        n_results=personalized_count*10
     )
-    personalized_ids = chroma_result["ids"][0]
+    personalized_ids = list(dict.fromkeys(
+        m["article_id"] for m in chroma_result["metadatas"][0]
+    ))
     personalized_articles = fetch_articles_by_ids(personalized_ids)
 
     con = duckdb.connect(DB_PATH, read_only=True)
@@ -104,6 +107,11 @@ def personalised_feed(user):
         if article["id"] not in seen:
             seen.add(article["id"])
             feed.append(article)
+    print(f"Personalized: {len(personalized_articles)}")
+    print(f"Fresh: {len(fresh_articles)}")
+    print(f"Exploratory: {len(exploratory_articles)}")
+    print(f"Combined before dedup: {len(combined)}")
+    print(f"Final feed: {len(feed)}")
 
     return feed
 

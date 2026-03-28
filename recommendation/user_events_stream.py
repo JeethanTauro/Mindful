@@ -7,4 +7,5 @@ from walrus import Database
 db = Database(host="localhost", port=config.REDIS_PORT)
 
 def push(e):
-    publish_to_redis_stream(event=e,db=db,stream_name="events/user_interactions")
+    print(f"Pushing event to stream: {e.model_dump()}")
+    publish_to_redis_stream(event=e.model_dump(),db=db,stream_name="events/user_interactions")
